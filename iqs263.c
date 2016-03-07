@@ -35,8 +35,31 @@
 /*	Get time for the IQS263 Timeout	*/
 #include <linux/time.h>
 
+/* Change the Thresholds for each channel (0x0A in this order) */
+static int PROX_THRESHOLD	 = 0x10; //0x10
+static int TOUCH_THRESHOLD = 0x20;
+static int TOUCH_THRESHOLD_CH1 = 0x20; //0x20
+static int TOUCH_THRESHOLD_CH2 = 0x20; //0x20
+static int TOUCH_THRESHOLD_CH3 = 0x20; //0x20
+static int MOVEMENT_THRESHOLD = 0x03;
+static int RESEED_BLOCK = 0x00;
+static int HALT_TIME = 0x14;
+static int I2C_TIMEOUT = 0x04;
 
-static bool debug = true;
+/* Change the Gesture Timing settings (0x0C in this order) */
+static int TAP_TIMER = 0x05;
+static int FLICK_TIMER = 0xA0;
+static int FLICK_THRESHOLD = 0x20;
+
+/* Set Active Channels (0x0D) */
+static int ACTIVE_CHS = 0x07; //only CH0 CH1 CH2
+
+/* Change the Timing settings (0x0B in this order) */
+static int ATI_TARGET_TOUCH = 0x30;
+static int ATI_TARGET_PROX = 0x40;
+
+
+static bool debug;
 #define dprintk(fmt, args...)	\
 	do {							          \
 		if (debug)					      \
@@ -61,7 +84,7 @@ static bool showReset;
 static bool reseed;
 
 /*	Global variable to keep the currentState in	*/
-u8 currentState;	/*	Always start at state 0	*/
+static u8 currentState;	/*	Always start at state 0	*/
 
 /*	Each client has this additional data	*/
 struct iqs263_sar_data {
@@ -87,6 +110,30 @@ struct events_data{
 };
 
 static struct events_data events;
+
+
+
+/*	Struct to keep the timer SAR Timer information in	*/
+static struct timer_list stuck_timer;
+
+/**
+ *	Function that gets called when an interrupt does not occur after a while
+ */
+void interrupt_timer(unsigned long datapointer)
+{
+	struct iqs263_sar_data *data = (struct iqs263_sar_data *)datapointer;
+	//Touch is finished
+	if (currentState > 0) {
+		/*	Now from here Reseed and go back to State 0	*/
+		currentState = 0;
+		dprintk("Touch Timeout\n");
+		input_report_key(data->input_dev,BTN_TOUCH,0);
+		input_sync(data->input_dev);
+	}
+}
+
+
+
 
 /********************************************************
  *		The IQS263 specific setup is done here			*
@@ -116,6 +163,7 @@ static void iqs263_init_setup(struct iqs263_sar_data *data)
 	/* Data buffer for communication with the IQS263, set to an array size of
 	*  8 elememnts, which can fit all the IQS263 settings. */
 	u8 data_buffer[8];
+	dprintk(KERN_INFO "INIT SETUP \n");
 
 	i2c_smbus_read_i2c_block_data(data->client, DEVICE_INFO, 2,
 		data_buffer);
@@ -184,13 +232,15 @@ static void iqs263_init_setup(struct iqs263_sar_data *data)
 	i2c_smbus_write_byte_data(data->client, PROX_SETTINGS0, REDO_ATI);
 
 	// Wait untill the ATI algorithm is done
-	do
-	{
-			mdelay(10);
-			i2c_smbus_read_i2c_block_data(data->client, SYS_FLAGS, 1,
-				data_buffer);
-	}while((data_buffer[0] & ATI_BUSY) == ATI_BUSY);
-
+	//dprintk("ATI \n");
+	//do
+	//{
+	//		mdelay(10);
+	//		i2c_smbus_read_i2c_block_data(data->client, SYS_FLAGS, 1,
+	//			data_buffer);
+	//		dprintk("FLAGS 1: 0x%x\n",data_buffer[0]);
+	//}while((data_buffer[0] & ATI_BUSY) == ATI_BUSY);
+  //dprintk("ATI END\n");
 	// Setup prox settings
 	data_buffer[0] = PROXSETTINGS0_VAL;
 	data_buffer[1] = (PROXSETTINGS1_VAL|EVENT_MODE);   //go to event
@@ -212,7 +262,7 @@ static void iqs263_init_setup(struct iqs263_sar_data *data)
  *	The function returns no value - instead Global flags are set to
  *	indicate the events that ocurred
  */
-static void readEvents(struct iqs263_sar_data *data, u8 *data_buffer)
+static bool readEvents(struct iqs263_sar_data *data, u8 *data_buffer)
 {
 	//u8 data_buffer[7];
 
@@ -223,22 +273,14 @@ static void readEvents(struct iqs263_sar_data *data, u8 *data_buffer)
 	i2c_smbus_read_i2c_block_data(data->client, SYS_FLAGS, 2,
 		&data_buffer[0]);
 
-	udelay(20);
-	i2c_smbus_read_i2c_block_data(data->client, TOUCH_BYTES, 2,
-		&data_buffer[2]);
+	if( !data_buffer[0] && !data_buffer[1]){
+			return false;
+	}
 
-  udelay(20);
-	i2c_smbus_read_i2c_block_data(data->client, COORDINATES, 3,
-		&data_buffer[4]);
+	dprintk("SYS_FLAGS 0: 0x%x\n", (int)(data_buffer[0]));
+	dprintk("SYS_FLAGS 1: 0x%x\n", (int)(data_buffer[1]));
 
-//	dprintk("SYS_FLAGS 0: 0x%x\n", (int)(data_buffer[0]));
-//	dprintk("SYS_FLAGS 1: 0x%x\n", (int)(data_buffer[1]));
-	//input_report_key(data->input_dev,KEY_ENTER,currentState);
-	//input_report_abs(data->input_dev,ABS_X, 0);
-	//input_report_abs(data->input_dev,ABS_Y, 0);
-	//input_sync(data->input_dev);
-
-	/*	We are interested in byte 0, byte 1 and byte 2	*/
+	/*	We are interested in byte 0, byte 1	*/
 	/*	These bytes will give us all of the info we need	*/
 	if (data_buffer[0] & SHOW_RESET)
 		showReset = true;
@@ -246,19 +288,24 @@ static void readEvents(struct iqs263_sar_data *data, u8 *data_buffer)
 		showReset = false;
 
 	if (data_buffer[1] & PROX_EVENT){
-		dprintk("PROX_EVENT: %d \n",currentState);
+		dprintk("PROX_EVENT:\n");
 		events.prox = true;
 	}else
 		events.prox = false;
 
 	if (data_buffer[1] & TOUCH_EVENT){
-		dprintk("TOUCH_EVENT: %d \n",currentState);
+		dprintk("TOUCH_EVENT\n");
 		events.touch = true;
+		dprintk("READ TOUCHBYTES \n");
+		i2c_smbus_read_i2c_block_data(data->client, TOUCH_BYTES, 2,
+			&data_buffer[2]);
+		i2c_smbus_read_i2c_block_data(data->client, COORDINATES, 3,
+			&data_buffer[4]);
 	}else
 		events.touch = false;
 
 	if (data_buffer[1] & SLIDE_EVENT){
-		dprintk("SLIDE_EVENT: %d \n",currentState);
+		dprintk("SLIDE_EVENT:\n");
 		events.slide = true;
 	}else
 		events.slide = false;
@@ -274,17 +321,18 @@ static void readEvents(struct iqs263_sar_data *data, u8 *data_buffer)
 		events.tap = false;
 
 	if (data_buffer[1] & FLICKLEFT_EVENT){
-		dprintk("FLICKLEFT_EVENT: %d \n",currentState);
+		dprintk("FLICKLEFT_EVENT\n");
 		events.flickLeft = true;
 	}else
 		events.flickLeft = false;
 
 	if (data_buffer[1] & FLICKRIGHT_EVENT){
-		dprintk("FLICKRIGHT_EVENT: %d \n",currentState);
+		dprintk("FLICKRIGHT_EVENT\n");
 		events.flickRight = true;
 	}else
 		events.flickRight = false;
 
+	return true;
 }
 
 /*************************************************************************/
@@ -299,7 +347,7 @@ struct iqs263_sar_platform_data {
  *	function that will initiate comms with the IQS263 if we want to talk
  *	to it.
  */
-void iqs263_event_mode_handshake(struct iqs263_sar_data *data)
+void __maybe_unused iqs263_event_mode_handshake(struct iqs263_sar_data *data)
 {
 	/********************************************************
 	 *			Try and do an Event Mode Handshake			*
@@ -360,14 +408,26 @@ static irqreturn_t iqs263_sar_interrupt(int irq, void *dev_id)
 
 	/**********************	State Machine	***************************/
 
-	readEvents(data,data_buffer);	/*	Check Events	*/
-
+	/*	Check Events	*/
+	if(!readEvents(data,data_buffer)){
+		dprintk("None Event\n");
+		goto no_event;
+	}
 
 	if (showReset) {
 		doInitialSetup = true;
 	}
 
-	/*	Wait for Prox event	*/
+  /* Check the flick events */
+	if(events.flickLeft){ //touch finished
+			input_report_key(data->input_dev,KEY_LEFT,1);
+			input_report_key(data->input_dev,KEY_LEFT,0);
+	}else if(events.flickRight){
+			input_report_key(data->input_dev,KEY_RIGHT,1);
+			input_report_key(data->input_dev,KEY_RIGHT,0);
+	}
+
+  /* Check the touch events */
 	/*	No Activation State	*/
 	if (currentState == 0) {
 
@@ -377,7 +437,10 @@ static irqreturn_t iqs263_sar_interrupt(int irq, void *dev_id)
 			dprintk("Touch0 : %x\n",(int)(data_buffer[2]));
 			if(events.slide | events.flickLeft | events.flickRight)
 			    currentState = 1;
-		} else
+		} else if(events.slide){
+			dprintk("SliderCoords : %x\n",(int)((data_buffer[6]<<8)|data_buffer[5]));
+			currentState = 1;
+		}else
 			currentState = 0;
 	}
 
@@ -395,22 +458,23 @@ static irqreturn_t iqs263_sar_interrupt(int irq, void *dev_id)
 			dprintk("SliderCoords : %x\n",(int)((data_buffer[6]<<8)|data_buffer[5]));
 			input_report_key(data->input_dev,BTN_TOUCH,1);
 			input_sync(data->input_dev);
+			del_timer(&stuck_timer);
+			setup_timer(&stuck_timer, interrupt_timer, data);
+			mod_timer(&stuck_timer,jiffies + msecs_to_jiffies(50));
 			goto out;
 		}
 
 		/*	Touch is still active - check other event	*/
 		if (events.touch) {
 			dprintk("Touch0 : %x\n",(int)(data_buffer[2]));
-			if(events.flickLeft){ //touch finished
-				  input_report_key(data->input_dev,KEY_LEFT,1);
-					input_report_key(data->input_dev,KEY_LEFT,0);
-			}else if(events.flickRight){
-				  input_report_key(data->input_dev,KEY_RIGHT,1);
-				  input_report_key(data->input_dev,KEY_RIGHT,0);
-			}
 			currentState = 0;
 			input_report_key(data->input_dev,BTN_TOUCH,0);
 			input_sync(data->input_dev);
+		}else if(events.prox){
+			dprintk("Prox End\n");
+			input_report_key(data->input_dev,BTN_TOUCH,0);
+			input_sync(data->input_dev);
+			currentState = 0;
 		}
 	} /*	end State 1	*/
 
@@ -419,6 +483,7 @@ static irqreturn_t iqs263_sar_interrupt(int irq, void *dev_id)
 	/* Jump to end after each Communications window	*/
 out:
   dprintk("========= currentState: %d =========\n", currentState);
+no_event:
 	return IRQ_HANDLED;
 }
 
@@ -490,7 +555,7 @@ static int iqs263_sar_probe(struct i2c_client *client,
 				": Bad irq number or handler\n");
 			goto exit_gpio_free_rdy_pin;
 	default:
-	    dprintk("Interrupt %d obtained\n",
+	    printk("Interrupt %d obtained\n",
 				client->irq);
 				break;
 	};
@@ -584,6 +649,24 @@ static int __init iqs263_sar_init(void)
 {
 	/*	Add i2c driver to kernel	*/
 	printk(KERN_ALERT "Installing IQS263 SAR Sensor Driver");
+
+  /* if the TOUCH_THRESHOLD is not the default value, change it */
+	printk(KERN_INFO "TOUCH_THRESHOLD 0x%x\n",TOUCH_THRESHOLD);
+
+	if(TOUCH_THRESHOLD_CH1 != TOUCH_THRESHOLD){
+		TOUCH_THRESHOLD_CH1 = TOUCH_THRESHOLD;
+		printk(KERN_INFO "TOUCH_THRESHOLD_CH1 0x%x\n",TOUCH_THRESHOLD_CH1);
+		TOUCH_THRESHOLD_CH2 = TOUCH_THRESHOLD;
+		printk(KERN_INFO "TOUCH_THRESHOLD_CH3 0x%x\n",TOUCH_THRESHOLD_CH2);
+		TOUCH_THRESHOLD_CH3 = TOUCH_THRESHOLD;
+		printk(KERN_INFO "TOUCH_THRESHOLD_CH3 0x%x\n",TOUCH_THRESHOLD_CH3);
+	}
+	printk(KERN_INFO "PROX_THRESHOLD 0x%x\n",PROX_THRESHOLD);
+
+	printk(KERN_INFO "FLICK_TIMER 0x%x\n",FLICK_TIMER);
+
+	printk(KERN_INFO "FLICK_THRESHOLD 0x%x\n",FLICK_THRESHOLD);
+
 	return i2c_add_driver(&iqs263_sar_driver);
 }
 
@@ -609,3 +692,21 @@ MODULE_LICENSE("GPL");
 
 module_param(debug, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debugging messages");
+
+module_param(PROX_THRESHOLD, int, S_IRUGO);
+MODULE_PARM_DESC(PROX_THRESHOLD, "The IQS263 PROX_THRESHOLD");
+
+module_param(TOUCH_THRESHOLD, int, S_IRUGO);
+MODULE_PARM_DESC(TOUCH_THRESHOLD, "The IQS263 TOUCH_THRESHOLD");
+
+module_param(FLICK_TIMER, int, S_IRUGO);
+MODULE_PARM_DESC(FLICK_TIMER, "The IQS263 FLICK_TIMER");
+
+module_param(FLICK_THRESHOLD, int, S_IRUGO);
+MODULE_PARM_DESC(FLICK_THRESHOLD, "The IQS263 FLICK_THRESHOLD");
+
+module_param(ATI_TARGET_TOUCH, int, S_IRUGO);
+MODULE_PARM_DESC(ATI_TARGET_TOUCH, "The IQS263 ATI_TARGET_TOUCH");
+
+module_param(ATI_TARGET_PROX, int, S_IRUGO);
+MODULE_PARM_DESC(ATI_TARGET_PROX, "The IQS263 ATI_TARGET_PROX");

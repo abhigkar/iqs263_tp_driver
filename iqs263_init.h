@@ -52,28 +52,9 @@
 #define PROXSETTINGS3_VAL					0x00
 #define EVENT_MASK_VAL						0xff
 
-/* Change the Thresholds for each channel (0x0A in this order) */
-#define PROX_THRESHOLD						0x08
-#define TOUCH_THRESHOLD_CH1			  0x20
-#define TOUCH_THRESHOLD_CH2				0x20
-#define TOUCH_THRESHOLD_CH3				0x20
-#define MOVEMENT_THRESHOLD				0x03
-#define RESEED_BLOCK						  0x00
-#define HALT_TIME						      0x14
-#define I2C_TIMEOUT						    0x04
+
 
 /* Change the Timing settings (0x0B in this order) */
 #define LOW_POWER						      0x00
-#define ATI_TARGET_TOUCH					0x30
-#define ATI_TARGET_PROX						0x40
-
-/* Change the Gesture Timing settings (0x0C in this order) */
-#define TAP_TIMER						      0x05
-#define FLICK_TIMER						    0x51
-#define FLICK_THRESHOLD						0x33
-
-/* Set Active Channels (0x0D) */
-#define ACTIVE_CHS						0x07 //only CH0 CH1 CH2
-
 
 #endif	/* IQS253_INIT_H */
